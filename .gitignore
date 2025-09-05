@@ -42,8 +42,8 @@ venv.bak/
 *.swo
 *~
 
-# Data files
-data/
+# Data files (but not source code)
+/data/
 *.db
 *.sqlite
 *.sqlite3
