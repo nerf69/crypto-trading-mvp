@@ -127,31 +127,56 @@ class CoinbaseDataFetcher:
         logger.error(f"Failed to fetch current price for {pair}")
         return None
     
-    def get_historical_data(self, pair: str, start_date: str, end_date: str, 
-                          granularity: int = 300) -> Optional[pd.DataFrame]:
+    def get_historical_data(self, pair: str, start_date: str, end_date: str = None, 
+                          granularity: int = 300, hours: int = None) -> Optional[pd.DataFrame]:
         """
         Get historical OHLCV data for a trading pair
         
         Args:
             pair: Trading pair (e.g., 'BTC-USD')
-            start_date: Start date in 'YYYY-MM-DD' format
-            end_date: End date in 'YYYY-MM-DD' format  
+            start_date: Start date in 'YYYY-MM-DD' format or granularity ('1h', '1d')
+            end_date: End date in 'YYYY-MM-DD' format (optional if using hours)
             granularity: Time slice in seconds (300 = 5min, 3600 = 1hr, 86400 = 1day)
+            hours: Number of hours to fetch from current time (optional)
         
         Returns:
             DataFrame with OHLCV data or None if failed
         """
-        logger.info(f"Fetching historical data for {pair} from {start_date} to {end_date}")
-        
-        # Check cache first
-        cached_data = self._get_cached_data(pair, start_date, end_date)
-        if cached_data is not None and len(cached_data) > 0:
-            logger.info(f"Using cached data for {pair}")
-            return cached_data
-        
-        # Convert dates to ISO format
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d').isoformat() + 'Z'
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d').isoformat() + 'Z'
+        # Handle different input formats
+        if hours is not None:
+            # Use hours parameter for recent data
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=hours)
+            start_dt = start_time.isoformat() + 'Z'
+            end_dt = end_time.isoformat() + 'Z'
+            
+            # Set granularity based on start_date if it's a timeframe string
+            if start_date in ['1h', '4h', '1d']:
+                granularity_map = {'1h': 3600, '4h': 14400, '1d': 86400}
+                granularity = granularity_map.get(start_date, 3600)
+            
+            logger.info(f"Fetching last {hours} hours of data for {pair} with {granularity}s granularity")
+        else:
+            # Traditional date range approach - for backtesting
+            if end_date is None:
+                raise ValueError("end_date is required when hours is not specified")
+            
+            logger.info(f"Backtesting data request: {pair} from {start_date} to {end_date} with {granularity}s granularity")
+            
+            # Validate granularity before proceeding
+            if not self._validate_granularity(granularity):
+                logger.error(f"Aborting request for {pair} due to invalid granularity")
+                return None
+            
+            # Check cache first for date range
+            cached_data = self._get_cached_data(pair, start_date, end_date)
+            if cached_data is not None and len(cached_data) > 0:
+                return cached_data
+            
+            # Convert dates to ISO format
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d').isoformat() + 'Z'
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d').isoformat() + 'Z'
+            logger.info(f"Cache miss - fetching fresh data from Coinbase API for {pair} ({start_date} to {end_date})")
         
         params = {
             'start': start_dt,
@@ -160,6 +185,16 @@ class CoinbaseDataFetcher:
         }
         
         data = self._make_request(f"/products/{pair}/candles", params)
+        
+        # Check for granularity error and retry with larger granularity if needed
+        if not data and hours is None:  # Only retry for backtesting requests (not dashboard)
+            logger.warning(f"Initial request failed for {pair}, attempting with larger granularity...")
+            data = self._retry_with_larger_granularity(pair, start_dt, end_dt, granularity)
+            
+            # If still no data, try chunked fetching as final fallback
+            if not data:
+                logger.warning(f"Large granularity failed for {pair}, trying chunked fetching...")
+                return self._fetch_chunked_data(pair, start_dt, end_dt, 86400)  # Use 1-day granularity for chunks
         
         if not data:
             logger.error(f"Failed to fetch historical data for {pair}")
@@ -183,13 +218,14 @@ class CoinbaseDataFetcher:
         
         logger.info(f"Retrieved {len(df)} data points for {pair}")
         
-        # Cache the data
-        self._cache_data(pair, df)
+        # Cache the data (only for date range queries, not hours-based)
+        if hours is None:
+            self._cache_data(pair, df)
         
         return df
     
     def _get_cached_data(self, pair: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Retrieve cached data from database"""
+        """Retrieve cached data from database with proper range validation"""
         try:
             conn = sqlite3.connect(self.db_path)
             
@@ -207,12 +243,40 @@ class CoinbaseDataFetcher:
             conn.close()
             
             if df.empty:
+                logger.debug(f"No cached data found for {pair} in range {start_date} to {end_date}")
                 return None
             
             # Convert timestamp back to datetime
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
             
-            logger.debug(f"Retrieved {len(df)} cached data points for {pair}")
+            # Validate cache coverage - ensure we have data that spans the requested range
+            cached_start = df['timestamp'].min()
+            cached_end = df['timestamp'].max()
+            requested_start = datetime.strptime(start_date, '%Y-%m-%d')
+            requested_end = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # Allow some tolerance (1 day) for start/end dates
+            start_tolerance = timedelta(days=1)
+            end_tolerance = timedelta(days=1)
+            
+            if (cached_start > requested_start + start_tolerance or 
+                cached_end < requested_end - end_tolerance):
+                logger.warning(f"Cached data for {pair} doesn't cover full range. "
+                             f"Cached: {cached_start.date()} to {cached_end.date()}, "
+                             f"Requested: {start_date} to {end_date}. "
+                             f"Found {len(df)} points - fetching fresh data.")
+                return None
+            
+            # Check for minimum data requirements for backtesting
+            expected_days = (requested_end - requested_start).days
+            if expected_days > 30:  # For longer backtests, ensure decent data density
+                min_expected_points = expected_days * 24 // 5  # Rough estimate for 5-min candles
+                if len(df) < min_expected_points * 0.5:  # Allow 50% tolerance
+                    logger.warning(f"Insufficient cached data density for {pair}. "
+                                 f"Expected ~{min_expected_points}, got {len(df)}. Fetching fresh data.")
+                    return None
+            
+            logger.info(f"Using cached data for {pair}: {len(df)} points from {cached_start.date()} to {cached_end.date()}")
             return df
             
         except Exception as e:
@@ -252,6 +316,104 @@ class CoinbaseDataFetcher:
             
         except Exception as e:
             logger.error(f"Error caching data: {e}")
+    
+    def _retry_with_larger_granularity(self, pair: str, start_dt: str, end_dt: str, original_granularity: int) -> Optional[Dict]:
+        """Retry API request with progressively larger granularities (Coinbase-supported only)"""
+        # Define granularity progression: 5min -> 15min -> 1hr -> 6hr -> 1day
+        granularity_options = [
+            (900, "15-minute"),    # 15 minutes  
+            (3600, "1-hour"),      # 1 hour
+            (21600, "6-hour"),     # 6 hours
+            (86400, "1-day")       # 1 day
+        ]
+        
+        for granularity, desc in granularity_options:
+            if granularity <= original_granularity:
+                continue  # Skip smaller or same granularity
+                
+            logger.info(f"Retrying {pair} request with {desc} granularity ({granularity}s)")
+            
+            params = {
+                'start': start_dt,
+                'end': end_dt,
+                'granularity': granularity
+            }
+            
+            data = self._make_request(f"/products/{pair}/candles", params)
+            if data:
+                logger.info(f"Successfully fetched {pair} data with {desc} granularity")
+                return data
+            else:
+                logger.warning(f"Failed with {desc} granularity for {pair}")
+        
+        return None
+    
+    def _fetch_chunked_data(self, pair: str, start_dt: str, end_dt: str, granularity: int) -> Optional[pd.DataFrame]:
+        """Fetch data in chunks when the request is too large even with optimal granularity"""
+        from datetime import datetime, timedelta
+        
+        start_date = datetime.fromisoformat(start_dt.replace('Z', '+00:00'))
+        end_date = datetime.fromisoformat(end_dt.replace('Z', '+00:00'))
+        
+        # Calculate chunk size based on granularity to keep under 250 points per chunk
+        max_points = 250
+        chunk_seconds = max_points * granularity
+        chunk_delta = timedelta(seconds=chunk_seconds)
+        
+        logger.info(f"Using chunked fetching for {pair}: {granularity}s granularity, {chunk_seconds/86400:.1f} day chunks")
+        
+        all_data = []
+        current_start = start_date
+        
+        while current_start < end_date:
+            current_end = min(current_start + chunk_delta, end_date)
+            
+            chunk_start_str = current_start.isoformat() + 'Z'
+            chunk_end_str = current_end.isoformat() + 'Z'
+            
+            logger.debug(f"Fetching chunk: {current_start.date()} to {current_end.date()}")
+            
+            params = {
+                'start': chunk_start_str,
+                'end': chunk_end_str,
+                'granularity': granularity
+            }
+            
+            chunk_data = self._make_request(f"/products/{pair}/candles", params)
+            
+            if chunk_data:
+                all_data.extend(chunk_data)
+                logger.debug(f"Retrieved {len(chunk_data)} points for chunk")
+            else:
+                logger.warning(f"Failed to fetch chunk for {pair} from {current_start.date()}")
+            
+            current_start = current_end
+            
+            # Add small delay between chunks to be API-friendly
+            import time
+            time.sleep(0.1)
+        
+        if all_data:
+            # Convert to DataFrame
+            df = pd.DataFrame(all_data, columns=['timestamp', 'low', 'high', 'open', 'close', 'volume'])
+            
+            # Remove duplicates and sort
+            df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
+            
+            logger.info(f"Successfully fetched {len(df)} total data points using chunked strategy")
+            return df
+        else:
+            logger.error(f"No data retrieved using chunked strategy for {pair}")
+            return None
+    
+    def _validate_granularity(self, granularity: int) -> bool:
+        """Validate that granularity is supported by Coinbase API"""
+        supported_granularities = [60, 300, 900, 3600, 21600, 86400]
+        
+        if granularity not in supported_granularities:
+            logger.error(f"Unsupported granularity: {granularity}s. Supported values: {supported_granularities}")
+            return False
+        return True
     
     def get_latest_data(self, pair: str, periods: int = 100) -> Optional[pd.DataFrame]:
         """

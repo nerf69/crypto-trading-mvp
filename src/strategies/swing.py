@@ -10,25 +10,24 @@ logger = logging.getLogger(__name__)
 
 class SwingTradingStrategy(Strategy):
     """
-    5% Swing Trading Strategy
+    2.5% Swing Trading Strategy (Optimized for Daily Data)
     
     Buy signals when:
-    - Price drops 5% or more from recent high
-    - RSI is oversold (< 30)
-    - Price is above key support level
-    - Volume is above average
+    - Price drops 2.5% or more from recent high (10-day lookback)
+    - RSI is oversold (< 35) - adjusted for daily timeframe
+    - Volume is above average (1.1x threshold)
     
     Sell signals when:
-    - Price gains 5% or more from recent low
-    - RSI is overbought (> 70) 
-    - Take profit target hit (5-10%)
+    - Price gains 2.5% or more from recent low
+    - RSI is overbought (> 65) - adjusted for daily timeframe
+    - Take profit target hit (2.5-7.5%)
     """
     
-    def __init__(self, swing_threshold: float = 0.05, volume_threshold: float = 1.2):
-        super().__init__("5% Swing Strategy")
-        self.swing_threshold = swing_threshold  # 5% swing threshold
-        self.volume_threshold = volume_threshold  # Volume must be 1.2x average
-        self.lookback_period = 20  # Period to look for highs/lows
+    def __init__(self, swing_threshold: float = 0.025, volume_threshold: float = 1.1):
+        super().__init__("2.5% Swing Strategy")
+        self.swing_threshold = swing_threshold  # 2.5% swing threshold for daily data
+        self.volume_threshold = volume_threshold  # Volume must be 1.1x average (less restrictive)
+        self.lookback_period = 10  # Period to look for highs/lows (reduced for daily)
     
     def add_required_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add indicators required by this strategy"""
@@ -125,15 +124,15 @@ class SwingTradingStrategy(Strategy):
         # BUY CONDITIONS
         # Price dropped significantly from recent high
         dropped_from_high = pct_from_high <= -swing_pct
-        oversold_rsi = rsi < 30
+        oversold_rsi = rsi < 35  # More lenient for daily data
         high_volume = volume_ratio >= self.volume_threshold
-        negative_momentum = price_momentum < -2  # Negative momentum
+        negative_momentum = price_momentum < -1.5  # Less strict momentum for daily
         
         # SELL CONDITIONS  
         # Price rose significantly from recent low
         rose_from_low = pct_from_low >= swing_pct
-        overbought_rsi = rsi > 70
-        positive_momentum = price_momentum > 2  # Positive momentum
+        overbought_rsi = rsi > 65  # More lenient for daily data
+        positive_momentum = price_momentum > 1.5  # Less strict momentum for daily
         
         # STRONG BUY CONDITIONS
         if (dropped_from_high and oversold_rsi and high_volume and 
@@ -142,7 +141,7 @@ class SwingTradingStrategy(Strategy):
             confidence = min(0.9, 0.6 + 
                            abs(pct_from_high) / 100 +  # Bigger drop = higher confidence
                            (max(0, self.volume_threshold - volume_ratio) * 0.1) +
-                           (max(0, 30 - rsi) / 100))  # More oversold = higher confidence
+                           (max(0, 35 - rsi) / 100))  # More oversold = higher confidence
             
             reason = f"Strong swing buy: {pct_from_high:.1f}% from high, RSI={rsi:.1f}, Vol={volume_ratio:.1f}x"
             return SignalType.STRONG_BUY, confidence, reason
@@ -152,7 +151,7 @@ class SwingTradingStrategy(Strategy):
             confidence = min(0.8, 0.4 + 
                            abs(pct_from_high) / 200 +
                            (volume_ratio - 1.0) * 0.1 +
-                           (max(0, 35 - rsi) / 100))
+                           (max(0, 40 - rsi) / 100))
             
             reason = f"Swing buy: {pct_from_high:.1f}% from high, RSI={rsi:.1f}, Vol={volume_ratio:.1f}x"
             return SignalType.BUY, confidence, reason
@@ -163,7 +162,7 @@ class SwingTradingStrategy(Strategy):
             
             confidence = min(0.9, 0.6 + 
                            pct_from_low / 100 +
-                           (max(0, rsi - 70) / 100))
+                           (max(0, rsi - 65) / 100))
             
             reason = f"Strong swing sell: {pct_from_low:.1f}% from low, RSI={rsi:.1f}"
             return SignalType.STRONG_SELL, confidence, reason
@@ -172,7 +171,7 @@ class SwingTradingStrategy(Strategy):
         elif rose_from_low and (overbought_rsi or positive_momentum):
             confidence = min(0.8, 0.4 + 
                            pct_from_low / 200 +
-                           (max(0, rsi - 65) / 100))
+                           (max(0, rsi - 60) / 100))
             
             reason = f"Swing sell: {pct_from_low:.1f}% from low, RSI={rsi:.1f}"
             return SignalType.SELL, confidence, reason
@@ -184,7 +183,7 @@ class SwingTradingStrategy(Strategy):
                 reason = f"No significant swing: {pct_from_high:.1f}% from high, {pct_from_low:.1f}% from low"
             elif volume_ratio < self.volume_threshold:
                 reason = f"Low volume: {volume_ratio:.1f}x average"
-            elif 30 <= rsi <= 70:
+            elif 35 <= rsi <= 65:
                 reason = f"Neutral RSI: {rsi:.1f}"
             else:
                 reason = f"Mixed signals: RSI={rsi:.1f}, Vol={volume_ratio:.1f}x"

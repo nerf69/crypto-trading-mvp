@@ -10,18 +10,18 @@ logger = logging.getLogger(__name__)
 
 class MACDStrategy(Strategy):
     """
-    MACD-based Trading Strategy
+    MACD-based Trading Strategy (Optimized for Daily Data)
     
     Buy signals when:
     - MACD line crosses above signal line (bullish crossover)
-    - MACD histogram turns positive
-    - MACD line crosses above zero line
+    - MACD histogram turns positive and increasing
+    - MACD line crosses above zero line with confirmation
     - Bullish divergence between price and MACD
     
     Sell signals when:
     - MACD line crosses below signal line (bearish crossover)  
-    - MACD histogram turns negative
-    - MACD line crosses below zero line
+    - MACD histogram turns negative and decreasing
+    - MACD line crosses below zero line with confirmation
     - Bearish divergence between price and MACD
     """
     
@@ -30,7 +30,7 @@ class MACDStrategy(Strategy):
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.signal_period = signal_period
-        self.divergence_lookback = 15  # Periods to look back for divergence
+        self.divergence_lookback = 10  # Reduced for daily timeframe
     
     def add_required_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add indicators required by this strategy"""
@@ -225,20 +225,27 @@ class MACDStrategy(Strategy):
             reason = f"MACD buy: bullish crossover, MACD={macd:.4f}, signal={macd_signal:.4f}"
             return SignalType.BUY, confidence, reason
         
-        # Zero line crossover (delayed but confirmed signal)
-        elif (macd_zero_crossover == 1 and macd > macd_signal and 
-              macd_histogram > 0):
+        # Zero line crossover (delayed but confirmed signal) - more lenient
+        elif (macd_zero_crossover == 1 and macd > macd_signal):
             
-            confidence = min(0.8, 0.65 + (macd_strength / 200))
+            confidence = min(0.8, 0.65 + (macd_strength / 200))  # Higher base confidence
             reason = f"MACD buy: zero crossover, MACD={macd:.4f} > signal"
             return SignalType.BUY, confidence, reason
         
-        # Histogram turning positive (early signal)
+        # Histogram turning positive (early signal) - more lenient
         elif (prev_histogram <= 0 and macd_histogram > 0 and
-              histogram_momentum > 0 and macd > macd_signal):
+              macd > macd_signal):  # Removed histogram_momentum requirement
             
-            confidence = min(0.75, 0.55 + max(0, histogram_momentum) / 100)
+            confidence = min(0.75, 0.60 + max(0, histogram_momentum) / 100)  # Higher base
             reason = f"MACD buy: histogram turned positive, momentum={histogram_momentum:.4f}"
+            return SignalType.BUY, confidence, reason
+        
+        # MACD trending upward - additional buy condition for daily data
+        elif (macd > macd_signal and macd_momentum > 0 and 
+              histogram_momentum > 0 and macd_histogram > 0):
+            
+            confidence = min(0.7, 0.60 + max(0, macd_momentum) / 50 + max(0, histogram_momentum) / 100)
+            reason = f"MACD buy: trending up, MACD={macd:.4f} > signal, positive momentum"
             return SignalType.BUY, confidence, reason
         
         # STRONG SELL CONDITIONS
@@ -283,20 +290,27 @@ class MACDStrategy(Strategy):
             reason = f"MACD sell: bearish crossover, MACD={macd:.4f}, signal={macd_signal:.4f}"
             return SignalType.SELL, confidence, reason
         
-        # Zero line crossover down
-        elif (macd_zero_crossover == -1 and macd < macd_signal and 
-              macd_histogram < 0):
+        # Zero line crossover down - more lenient
+        elif (macd_zero_crossover == -1 and macd < macd_signal):
             
-            confidence = min(0.8, 0.65 + (macd_strength / 200))
+            confidence = min(0.8, 0.65 + (macd_strength / 200))  # Higher base confidence
             reason = f"MACD sell: zero crossover down, MACD={macd:.4f} < signal"
             return SignalType.SELL, confidence, reason
         
-        # Histogram turning negative
+        # Histogram turning negative - more lenient
         elif (prev_histogram >= 0 and macd_histogram < 0 and
-              histogram_momentum < 0 and macd < macd_signal):
+              macd < macd_signal):  # Removed histogram_momentum requirement
             
-            confidence = min(0.75, 0.55 + abs(min(0, histogram_momentum)) / 100)
+            confidence = min(0.75, 0.60 + abs(min(0, histogram_momentum)) / 100)  # Higher base
             reason = f"MACD sell: histogram turned negative, momentum={histogram_momentum:.4f}"
+            return SignalType.SELL, confidence, reason
+        
+        # MACD trending downward - additional sell condition for daily data
+        elif (macd < macd_signal and macd_momentum < 0 and 
+              histogram_momentum < 0 and macd_histogram < 0):
+            
+            confidence = min(0.7, 0.60 + abs(min(0, macd_momentum)) / 50 + abs(min(0, histogram_momentum)) / 100)
+            reason = f"MACD sell: trending down, MACD={macd:.4f} < signal, negative momentum"
             return SignalType.SELL, confidence, reason
         
         # HOLD CONDITIONS

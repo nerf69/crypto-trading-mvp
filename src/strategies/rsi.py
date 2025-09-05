@@ -10,26 +10,26 @@ logger = logging.getLogger(__name__)
 
 class RSIStrategy(Strategy):
     """
-    RSI-based Trading Strategy
+    RSI-based Trading Strategy (Optimized for Daily Data)
     
     Buy signals when:
-    - RSI drops below oversold threshold (30)
+    - RSI drops below oversold threshold (35) - adjusted for daily timeframe
     - RSI shows bullish divergence
     - Price confirms with upward momentum
     
     Sell signals when:
-    - RSI rises above overbought threshold (70)
+    - RSI rises above overbought threshold (65) - adjusted for daily timeframe
     - RSI shows bearish divergence
     - Price confirms with downward momentum
     """
     
-    def __init__(self, oversold_threshold: float = 30, overbought_threshold: float = 70, 
+    def __init__(self, oversold_threshold: float = 35, overbought_threshold: float = 65, 
                  rsi_period: int = 14):
         super().__init__("RSI Strategy")
-        self.oversold_threshold = oversold_threshold
-        self.overbought_threshold = overbought_threshold
+        self.oversold_threshold = oversold_threshold  # More lenient for daily data
+        self.overbought_threshold = overbought_threshold  # More lenient for daily data
         self.rsi_period = rsi_period
-        self.divergence_lookback = 10  # Periods to look back for divergence
+        self.divergence_lookback = 7  # Reduced for daily timeframe
     
     def add_required_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add indicators required by this strategy"""
@@ -54,9 +54,9 @@ class RSIStrategy(Strategy):
                 # RSI divergence detection
                 df['rsi_divergence'] = self._detect_divergence(df)
             
-            # Price momentum for confirmation
-            df['price_momentum_3'] = df['close'].pct_change(3) * 100
-            df['price_momentum_5'] = df['close'].pct_change(5) * 100
+            # Price momentum for confirmation (adjusted for daily)
+            df['price_momentum_3'] = df['close'].pct_change(2) * 100  # Shorter for daily
+            df['price_momentum_5'] = df['close'].pct_change(3) * 100  # Shorter for daily
             
             # Stochastic for additional confirmation
             if 'stoch_k' in df.columns:
@@ -161,11 +161,11 @@ class RSIStrategy(Strategy):
         """Evaluate RSI trading conditions"""
         
         # STRONG BUY CONDITIONS
-        if (rsi <= 25 and rsi_momentum > 0 and  # Very oversold with upward RSI momentum
+        if (rsi <= 30 and rsi_momentum > 0 and  # Very oversold with upward RSI momentum (adjusted)
             (rsi_divergence > 0 or price_momentum_3 > 0)):  # Bullish divergence or price confirmation
             
             confidence = min(0.9, 0.7 + 
-                           (30 - rsi) / 100 +  # More oversold = higher confidence
+                           (35 - rsi) / 100 +  # More oversold = higher confidence (adjusted)
                            max(0, rsi_momentum) / 10 +
                            max(0, price_momentum_3) / 20)
             
@@ -177,14 +177,14 @@ class RSIStrategy(Strategy):
         
         # REGULAR BUY CONDITIONS
         elif (rsi <= self.oversold_threshold and 
-              (rsi_momentum > 0 or price_momentum_5 > 1 or stoch_k < 20)):
+              (rsi_momentum > 0 or price_momentum_5 > 0.5 or stoch_k < 25)):  # More lenient
             
             confirmation_score = 0
             if rsi_momentum > 0:
                 confirmation_score += 0.15
-            if price_momentum_5 > 1:
+            if price_momentum_5 > 0.5:  # More lenient
                 confirmation_score += 0.1  
-            if stoch_k < 20:
+            if stoch_k < 25:  # More lenient
                 confirmation_score += 0.1
             
             confidence = min(0.8, 0.5 + 
@@ -194,17 +194,17 @@ class RSIStrategy(Strategy):
             reason = f"RSI buy: RSI={rsi:.1f} (oversold)"
             if rsi_momentum > 0:
                 reason += f", rising momentum={rsi_momentum:.2f}"
-            if price_momentum_5 > 1:
+            if price_momentum_5 > 0.5:
                 reason += f", price momentum={price_momentum_5:.1f}%"
             
             return SignalType.BUY, confidence, reason
         
         # STRONG SELL CONDITIONS
-        elif (rsi >= 75 and rsi_momentum < 0 and  # Very overbought with downward RSI momentum
+        elif (rsi >= 70 and rsi_momentum < 0 and  # Very overbought with downward RSI momentum (adjusted)
               (rsi_divergence < 0 or price_momentum_3 < 0)):  # Bearish divergence or price confirmation
             
             confidence = min(0.9, 0.7 + 
-                           (rsi - 70) / 100 +  # More overbought = higher confidence
+                           (rsi - 65) / 100 +  # More overbought = higher confidence (adjusted)
                            abs(min(0, rsi_momentum)) / 10 +
                            abs(min(0, price_momentum_3)) / 20)
             
@@ -216,14 +216,14 @@ class RSIStrategy(Strategy):
         
         # REGULAR SELL CONDITIONS
         elif (rsi >= self.overbought_threshold and
-              (rsi_momentum < 0 or price_momentum_5 < -1 or stoch_k > 80)):
+              (rsi_momentum < 0 or price_momentum_5 < -0.5 or stoch_k > 75)):  # More lenient
             
             confirmation_score = 0
             if rsi_momentum < 0:
                 confirmation_score += 0.15
-            if price_momentum_5 < -1:
+            if price_momentum_5 < -0.5:  # More lenient
                 confirmation_score += 0.1
-            if stoch_k > 80:
+            if stoch_k > 75:  # More lenient
                 confirmation_score += 0.1
             
             confidence = min(0.8, 0.5 + 
@@ -233,7 +233,7 @@ class RSIStrategy(Strategy):
             reason = f"RSI sell: RSI={rsi:.1f} (overbought)"
             if rsi_momentum < 0:
                 reason += f", falling momentum={rsi_momentum:.2f}"
-            if price_momentum_5 < -1:
+            if price_momentum_5 < -0.5:
                 reason += f", price momentum={price_momentum_5:.1f}%"
             
             return SignalType.SELL, confidence, reason

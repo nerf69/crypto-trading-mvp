@@ -41,13 +41,10 @@ class Position:
         self.exit_time = exit_time
         self.exit_reason = reason
         
-        # Calculate P&L
-        if self.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]:
-            self.pnl = (exit_price - self.entry_price) * self.size
-            self.pnl_pct = ((exit_price - self.entry_price) / self.entry_price) * 100
-        else:  # SELL or STRONG_SELL
-            self.pnl = (self.entry_price - exit_price) * self.size
-            self.pnl_pct = ((self.entry_price - exit_price) / self.entry_price) * 100
+        # Calculate P&L for spot trading (long positions only)
+        # P&L = (exit_price - entry_price) * size
+        self.pnl = (exit_price - self.entry_price) * self.size
+        self.pnl_pct = ((exit_price - self.entry_price) / self.entry_price) * 100
 
 @dataclass  
 class BacktestResult:
@@ -72,6 +69,56 @@ class BacktestResult:
     positions: List[Position]
     equity_curve: pd.DataFrame
     trade_log: pd.DataFrame
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert BacktestResult to dictionary format compatible with dashboard"""
+        # Convert positions to dict format
+        trades_data = []
+        for pos in self.positions:
+            if not pos.is_open():
+                trades_data.append({
+                    'entry_time': pos.entry_time.strftime('%Y-%m-%d %H:%M:%S') if pos.entry_time else None,
+                    'exit_time': pos.exit_time.strftime('%Y-%m-%d %H:%M:%S') if pos.exit_time else None,
+                    'signal': pos.signal_type.value,
+                    'entry_price': pos.entry_price,
+                    'exit_price': pos.exit_price,
+                    'return': pos.pnl_pct,
+                    'pnl': pos.pnl,
+                    'exit_reason': pos.exit_reason
+                })
+        
+        # Convert equity curve to dict format
+        equity_data = []
+        if not self.equity_curve.empty:
+            for _, row in self.equity_curve.iterrows():
+                equity_data.append({
+                    'date': row['timestamp'].strftime('%Y-%m-%d %H:%M:%S') if 'timestamp' in row else None,
+                    'value': row.get('equity', 0)
+                })
+        
+        return {
+            'metrics': {
+                'total_return': self.total_return_pct,
+                'win_rate': self.win_rate,
+                'max_drawdown': self.max_drawdown_pct,
+                'sharpe_ratio': self.sharpe_ratio,
+                'total_trades': self.total_trades,
+                'winning_trades': self.winning_trades,
+                'losing_trades': self.losing_trades,
+                'avg_win': self.avg_win,
+                'avg_loss': self.avg_loss,
+                'initial_capital': self.initial_capital,
+                'final_capital': self.final_capital,
+                'total_return_absolute': self.total_return
+            },
+            'trades': trades_data,
+            'equity_curve': equity_data
+        }
+    
+    def get(self, key: str, default=None):
+        """Dictionary-like get method for backward compatibility"""
+        result_dict = self.to_dict()
+        return result_dict.get(key, default)
 
 class BacktestEngine:
     """
@@ -161,14 +208,52 @@ class BacktestEngine:
                 
         return results
     
+    def _calculate_optimal_granularity(self, start_date: str, end_date: str) -> Tuple[int, str]:
+        """
+        Calculate optimal granularity based on date range to respect Coinbase API limits
+        Uses only Coinbase-supported granularities: 60s, 300s, 900s, 3600s, 21600s, 86400s
+        
+        Returns:
+            Tuple of (granularity_seconds, description)
+        """
+        from datetime import datetime
+        
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        days = (end_dt - start_dt).days
+        
+        # Coinbase allows max 300 data points per request
+        # Use buffer of 250 points to be safe
+        max_points = 250
+        
+        if days <= 1:
+            # Up to 1 day: 5-minute granularity (288 points max)
+            return 300, "5-minute"
+        elif days <= 7:
+            # Up to 1 week: 1-hour granularity (168 points max)
+            return 3600, "1-hour"
+        elif days <= 42:
+            # Up to 6 weeks: 6-hour granularity (168 points max)
+            return 21600, "6-hour"
+        else:
+            # More than 6 weeks: 1-day granularity (max ~200 points for 200 days)
+            return 86400, "1-day"
+    
     def _fetch_and_prepare_data(self, pair: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Fetch and prepare historical data for backtesting"""
+        """Fetch and prepare historical data for backtesting with proper validation"""
         try:
-            df = self.data_fetcher.get_historical_data(pair, start_date, end_date, granularity=300)  # 5-min data
+            # Calculate optimal granularity for the date range
+            granularity, granularity_desc = self._calculate_optimal_granularity(start_date, end_date)
+            
+            logger.info(f"Using {granularity_desc} granularity for {pair} backtesting ({start_date} to {end_date})")
+            
+            df = self.data_fetcher.get_historical_data(pair, start_date, end_date, granularity=granularity)
             
             if df is None or df.empty:
                 logger.warning(f"No data returned for {pair}")
                 return None
+            
+            logger.info(f"Fetched {len(df)} raw data points for {pair} from {start_date} to {end_date} with {granularity_desc} resolution")
             
             # Clean and validate data
             df = self.data_processor.clean_data(df)
@@ -177,7 +262,56 @@ class BacktestEngine:
                 logger.warning(f"No data remaining after cleaning for {pair}")
                 return None
             
-            logger.debug(f"Prepared {len(df)} data points for {pair}")
+            # Validate minimum data requirements for backtesting (adaptive based on granularity)
+            granularity_desc = "1-day" if granularity == 86400 else "1-hour" if granularity == 3600 else "5-minute"
+            
+            # Adaptive minimum based on granularity and date range
+            from datetime import datetime
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            days_requested = (end_dt - start_dt).days
+            
+            if granularity >= 86400:  # Daily or larger
+                min_required_points = max(30, days_requested // 3)  # At least 30 points, or 1/3 of days
+            elif granularity >= 3600:  # Hourly
+                min_required_points = max(50, days_requested * 4)  # More points for hourly data
+            else:  # 5-minute or smaller
+                min_required_points = 100  # Original requirement for high-frequency data
+                
+            if len(df) < min_required_points:
+                logger.warning(f"Insufficient data for backtesting {pair} with {granularity_desc} granularity. "
+                             f"Got {len(df)} points, need at least {min_required_points}. "
+                             f"Consider using a longer date range.")
+                
+                if days_requested < 7:
+                    logger.info(f"Recommendation: Try a longer date range (current: {days_requested} days)")
+                elif granularity >= 86400 and days_requested < 90:
+                    logger.info(f"Recommendation: For daily data, try at least 90 days for better results")
+                
+                return None
+            
+            # Check data continuity - look for large gaps based on granularity
+            df_sorted = df.sort_values('timestamp')
+            time_diffs = df_sorted['timestamp'].diff()
+            
+            # Define expected gap threshold based on granularity
+            if granularity <= 300:  # 5-minute or smaller
+                gap_threshold = pd.Timedelta(hours=1)
+            elif granularity <= 3600:  # up to 1 hour
+                gap_threshold = pd.Timedelta(hours=6)
+            elif granularity <= 21600:  # up to 6 hours
+                gap_threshold = pd.Timedelta(days=1)
+            else:  # daily or larger
+                gap_threshold = pd.Timedelta(days=3)
+            
+            # Find gaps larger than expected
+            large_gaps = time_diffs[time_diffs > gap_threshold]
+            
+            if len(large_gaps) > len(df) * 0.1:  # More than 10% gaps
+                logger.warning(f"Data for {pair} has significant gaps: {len(large_gaps)} large gaps found with {granularity_desc} granularity")
+            
+            logger.info(f"Prepared {len(df)} data points for {pair} backtesting "
+                       f"(from {df['timestamp'].min().date()} to {df['timestamp'].max().date()})")
             return df
             
         except Exception as e:
@@ -199,7 +333,10 @@ class BacktestEngine:
         max_positions = self.config.get('trading.max_positions', 3)
         position_sizing = self.config.get('trading.position_sizing', {})
         
-        logger.debug(f"Starting simulation with ${initial_capital:.2f} capital")
+        logger.info(f"Starting simulation with ${initial_capital:.2f} capital on {len(df)} data points")
+        # Larger warmup period for daily data to allow indicators to stabilize
+        warmup_period = min(50, len(df) // 3)  # Use 33% of data or 50 points, whichever is smaller
+        logger.info(f"Signal generation will start after {warmup_period} warmup periods")
         
         for i in range(len(df)):
             current_row = df.iloc[i]
@@ -219,12 +356,23 @@ class BacktestEngine:
                                f"P&L: ${position.pnl:.2f} ({position.pnl_pct:.2f}%)")
             
             # Generate trading signal (need sufficient historical data)
-            if i >= 50:  # Wait for indicators to stabilize
+            if i >= warmup_period:  # Wait for indicators to stabilize
                 try:
                     signal = strategy.calculate_signal(df.iloc[:i+1], pair)
                     
-                    # Check if we should enter a new position
-                    if (signal.signal in [SignalType.BUY, SignalType.STRONG_BUY, SignalType.SELL, SignalType.STRONG_SELL] and
+                    # Log first signal generation and debug info
+                    if i == warmup_period:
+                        logger.info(f"Signal generation started at period {i+1}/{len(df)} for {pair}")
+                        # Debug: Show available indicators
+                        available_indicators = [col for col in df.columns if col not in ['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+                        logger.debug(f"Available indicators: {available_indicators}")
+                    
+                    # Debug: Log signal details every 10 periods or for non-hold signals
+                    if (i % 10 == 0 and i > warmup_period) or signal.signal != SignalType.HOLD:
+                        logger.debug(f"Period {i+1}: {signal.signal.value} signal - {signal.reason} (confidence: {signal.confidence:.2f})")
+                    
+                    # Handle BUY signals - enter new long positions
+                    if (signal.signal in [SignalType.BUY, SignalType.STRONG_BUY] and
                         len(open_positions) < max_positions and
                         signal.confidence >= 0.6):  # Minimum confidence threshold
                         
@@ -249,6 +397,24 @@ class BacktestEngine:
                             logger.debug(f"Opened position: {pair} {signal.signal.value} "
                                        f"at ${current_price:.2f}, size: {position_size:.4f}, "
                                        f"confidence: {signal.confidence:.2f}")
+                    
+                    # Handle SELL signals - close existing long positions only
+                    elif (signal.signal in [SignalType.SELL, SignalType.STRONG_SELL] and
+                          signal.confidence >= 0.6):
+                        
+                        # Find and close any open long positions for this pair
+                        positions_to_close = [pos for pos in open_positions 
+                                           if pos.pair == pair and 
+                                              pos.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]]
+                        
+                        for position in positions_to_close:
+                            position.close_position(current_price, current_time, f"Strategy sell signal ({signal.signal.value})")
+                            open_positions.remove(position)
+                            
+                            # Update capital
+                            current_capital += position.pnl
+                            logger.debug(f"Closed long position: {position.pair} due to {signal.signal.value} signal "
+                                       f"P&L: ${position.pnl:.2f} ({position.pnl_pct:.2f}%)")
                 
                 except Exception as e:
                     logger.debug(f"Error generating signal at index {i}: {e}")
@@ -286,6 +452,31 @@ class BacktestEngine:
         
         # Create trade log DataFrame
         trade_log = self._create_trade_log(positions)
+        
+        # Validation and debugging summary
+        logger.info(f"Backtest completed for {strategy.name} on {pair}")
+        logger.info(f"Total positions opened: {len(positions)}")
+        logger.info(f"Data points processed: {len(df)}")
+        logger.info(f"Warmup period: {warmup_period} points")
+        logger.info(f"Signal generation periods: {len(df) - warmup_period}")
+        
+        # Debug: Check if indicators are present in final data
+        final_data = df.iloc[-1]
+        key_indicators = ['rsi', 'macd', 'macd_signal', 'sma_20', 'sma_50']
+        missing_indicators = [ind for ind in key_indicators if ind not in df.columns]
+        if missing_indicators:
+            logger.warning(f"Missing key indicators: {missing_indicators}")
+        else:
+            logger.debug(f"Final indicator values: {dict(final_data[key_indicators])}")
+        
+        # Debug: Signal distribution summary
+        signal_counts = {'BUY': 0, 'STRONG_BUY': 0, 'SELL': 0, 'STRONG_SELL': 0, 'HOLD': 0}
+        for pos in positions:
+            if pos.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]:
+                signal_counts['BUY'] += 1
+                if pos.signal_type == SignalType.STRONG_BUY:
+                    signal_counts['STRONG_BUY'] += 1
+        logger.debug(f"Signal distribution: {signal_counts}")
         
         # Calculate final metrics
         final_capital = current_capital
@@ -413,11 +604,15 @@ class BacktestEngine:
         )
     
     def _calculate_position_value(self, position: Position, current_price: float) -> float:
-        """Calculate current value of an open position"""
+        """Calculate current value of an open long position (spot trading only)"""
+        # For spot trading, we only have long positions (BUY signals)
+        # Position value = unrealized P&L = (current_price - entry_price) * size
         if position.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]:
             return (current_price - position.entry_price) * position.size
         else:
-            return (position.entry_price - current_price) * position.size
+            # This shouldn't happen in spot trading, but handle gracefully
+            logger.warning(f"Unexpected position type {position.signal_type} in spot trading")
+            return 0.0
     
     def _create_trade_log(self, positions: List[Position]) -> pd.DataFrame:
         """Create a DataFrame with detailed trade log"""
