@@ -1,0 +1,56 @@
+# Coinbase Configuration
+exchange:
+  name: "coinbase"
+  base_url: "https://api.exchange.coinbase.com"
+  
+# Trading Pairs - Focus on non-BTC majors
+trading_pairs:
+  - "SOL-USD"
+  - "ETH-USD"
+  - "AVAX-USD"
+  - "MATIC-USD"
+  - "LINK-USD"
+  - "UNI-USD"
+  - "ATOM-USD"
+  - "DOT-USD"
+
+# Trading Configuration  
+trading:
+  initial_capital: 1000
+  max_positions: 3
+  position_sizing:
+    method: "dynamic"  # dynamic or fixed
+    max_position_size: 1.0  # 100% for best signals
+    min_position_size: 0.33  # 33% for weaker signals
+  update_interval: 300  # 5 minutes in seconds
+
+# Risk Management
+risk:
+  stop_loss: 0.05  # 5%
+  use_trailing_stop: false
+  max_daily_loss: 0.10  # 10% daily loss limit
+
+# Backtesting
+backtesting:
+  start_date: "2024-03-01"  # 6 months ago
+  end_date: "2024-09-01"
+  initial_capital: 100
+  commission: 0.005  # 0.5% per trade
+
+# Notifications
+notifications:
+  email:
+    enabled: true
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    from_email: "your_email@gmail.com"
+    to_email: "your_email@gmail.com"
+    # Password should be in .env file
+
+# Strategy Weights (for combined strategy)
+strategy_weights:
+  swing: 1.0
+  rsi: 0.8
+  macd: 0.7
+  bollinger: 0.6
+  support_resistance: 0.9
