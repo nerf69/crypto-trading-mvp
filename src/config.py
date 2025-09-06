@@ -92,15 +92,16 @@ class Config:
         """Get notification configuration"""
         return self.get('notifications', {})
 
-# Global config instance
-_config = None
+# Global config cache
+_config_cache = {}
 
 def get_config(config_path: str = "config.yaml") -> Config:
-    """Get global config instance"""
-    global _config
-    if _config is None:
-        _config = Config(config_path)
-    return _config
+    """Get config instance, cached by path"""
+    global _config_cache
+    abs_path = os.path.abspath(config_path)
+    if abs_path not in _config_cache:
+        _config_cache[abs_path] = Config(config_path)
+    return _config_cache[abs_path]
 
 # Environment variable getters
 def get_email_password() -> str:
