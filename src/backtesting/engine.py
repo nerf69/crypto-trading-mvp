@@ -127,7 +127,10 @@ class BacktestEngine:
     
     def __init__(self, config=None):
         self.config = config or get_config()
-        self.data_fetcher = CoinbaseDataFetcher()
+        self.data_fetcher = CoinbaseDataFetcher(
+            self.config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
+            self.config.get('database.path', 'data/trading.db')
+        )
         self.data_processor = DataProcessor()
         
         # Backtesting parameters

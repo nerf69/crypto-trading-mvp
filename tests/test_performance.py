@@ -64,7 +64,7 @@ class TestDataProcessingPerformance:
         
         # Test oscillator indicators performance
         start_time = time.time()
-        result_oscillator = processor.add_oscillator_indicators(result_basic)
+        result_oscillator = processor.add_momentum_indicators(result_basic)
         oscillator_time = time.time() - start_time
         
         assert oscillator_time < 3.0, f"Oscillator indicators took {oscillator_time:.2f}s"
@@ -106,7 +106,7 @@ class TestDataProcessingPerformance:
         
         # Process the large dataset
         result = processor.add_basic_indicators(large_data)
-        result = processor.add_oscillator_indicators(result)
+        result = processor.add_momentum_indicators(result)
         result = processor.add_momentum_indicators(result)
         
         final_memory = process.memory_info().rss / 1024 / 1024  # MB
@@ -186,7 +186,7 @@ class TestStrategyPerformance:
         # Add all indicators
         processor = DataProcessor()
         processed_data = processor.add_basic_indicators(test_data)
-        processed_data = processor.add_oscillator_indicators(processed_data)
+        processed_data = processor.add_momentum_indicators(processed_data)
         processed_data = processor.add_momentum_indicators(processed_data)
         
         strategies = [
@@ -233,7 +233,7 @@ class TestStrategyPerformance:
         
         processor = DataProcessor()
         processed_data = processor.add_basic_indicators(test_data)
-        processed_data = processor.add_oscillator_indicators(processed_data)
+        processed_data = processor.add_momentum_indicators(processed_data)
         processed_data = processor.add_momentum_indicators(processed_data)
         
         strategies = [
@@ -307,7 +307,7 @@ class TestBacktestingPerformance:
         # Add indicators
         processor = DataProcessor()
         processed_data = processor.add_basic_indicators(large_data)
-        processed_data = processor.add_oscillator_indicators(processed_data)
+        processed_data = processor.add_momentum_indicators(processed_data)
         
         strategies = [
             ('Swing', SwingTradingStrategy()),
@@ -317,7 +317,7 @@ class TestBacktestingPerformance:
         
         for name, strategy in strategies:
             start_time = time.time()
-            result = backtest_engine.run_backtest(strategy, processed_data, "BTC-USD")
+            result = backtest_engine.run_backtest(strategy, "BTC-USD", "2024-01-01", "2024-12-31")
             backtest_time = time.time() - start_time
             
             # Backtesting should complete within reasonable time (< 10s for 365 days)
@@ -357,13 +357,13 @@ class TestBacktestingPerformance:
         start_time = time.time()
         sequential_results = {}
         for pair in pairs:
-            result = backtest_engine.run_backtest(strategy, processed_data, pair)
+            result = backtest_engine.run_backtest(strategy, pair, "2024-01-01", "2024-12-31")
             sequential_results[pair] = result
         sequential_time = time.time() - start_time
         
         # Test concurrent backtesting
         def run_backtest_for_pair(pair):
-            return pair, backtest_engine.run_backtest(strategy, processed_data, pair)
+            return pair, backtest_engine.run_backtest(strategy, pair, "2024-01-01", "2024-12-31")
         
         start_time = time.time()
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -398,7 +398,7 @@ class TestDatabasePerformance:
             timestamp = base_timestamp + (i * 86400)  # Daily intervals
             price = 50000 + np.random.normal(0, 1000)
             large_mock_data.append([
-                timestamp, price, price * 1.02, price * 0.98, 
+                timestamp, price * 0.98, price * 1.02, price, 
                 price + np.random.normal(0, 500), np.random.uniform(1000, 5000)
             ])
         
@@ -407,7 +407,10 @@ class TestDatabasePerformance:
         mock_session_class.return_value = mock_session
         
         config = Config(temp_config_file)
-        fetcher = CoinbaseDataFetcher(config)
+        fetcher = CoinbaseDataFetcher(
+            config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
+            config.get('database.path', 'data/trading.db')
+        )
         
         # Test database write performance
         start_time = time.time()
@@ -433,7 +436,10 @@ class TestDatabasePerformance:
         
         def create_fetcher_and_query():
             """Create a fetcher and perform a query"""
-            fetcher = CoinbaseDataFetcher(config)
+            fetcher = CoinbaseDataFetcher(
+                config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
+                config.get('database.path', 'data/trading.db')
+            )
             # This will create/access the database
             return fetcher
         
@@ -484,7 +490,7 @@ class TestMemoryLeakDetection:
         
         # Run many backtests
         for i in range(50):
-            result = backtest_engine.run_backtest(strategy, processed_data, f"TEST-{i}")
+            result = backtest_engine.run_backtest(strategy, f"TEST-{i}", "2024-01-01", "2024-01-31")
             
             # Measure memory every 10 iterations
             if i % 10 == 0:
@@ -529,7 +535,7 @@ class TestMemoryLeakDetection:
             
             # Process data
             result = processor.add_basic_indicators(test_data)
-            result = processor.add_oscillator_indicators(result)
+            result = processor.add_momentum_indicators(result)
             
             # Explicitly delete to test cleanup
             del test_data, result
@@ -572,7 +578,7 @@ class TestScalabilityBounds:
         start_time = time.time()
         try:
             result = processor.add_basic_indicators(max_data)
-            result = processor.add_oscillator_indicators(result)
+            result = processor.add_momentum_indicators(result)
             processing_time = time.time() - start_time
             
             assert len(result) == max_size
@@ -607,7 +613,7 @@ class TestScalabilityBounds:
             """Run multiple operations concurrently"""
             backtest_engine = BacktestEngine(config)
             strategy = SwingTradingStrategy()
-            return backtest_engine.run_backtest(strategy, processed_data, "BTC-USD")
+            return backtest_engine.run_backtest(strategy, "BTC-USD", "2024-01-01", "2024-01-31")
         
         # Test with high concurrency
         max_workers = 10

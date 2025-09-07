@@ -78,7 +78,7 @@ class TestDataEdgeCases:
         identical_data.set_index('timestamp', inplace=True)
         
         result = processor.add_basic_indicators(identical_data)
-        result = processor.add_oscillator_indicators(result)
+        result = processor.add_momentum_indicators(result)
         
         # Moving averages should equal the price
         assert np.allclose(result['sma_20'].dropna(), 50000.0)
@@ -106,7 +106,7 @@ class TestDataEdgeCases:
         extreme_data.set_index('timestamp', inplace=True)
         
         result = processor.add_basic_indicators(extreme_data)
-        result = processor.add_oscillator_indicators(result)
+        result = processor.add_momentum_indicators(result)
         
         # Should not produce NaN, inf, or negative values inappropriately
         assert not np.isinf(result['sma_20']).any()
@@ -309,7 +309,7 @@ class TestBacktestingEdgeCases:
         })
         test_data.set_index('timestamp', inplace=True)
         
-        result = backtest_engine.run_backtest(strategy, test_data, "BTC-USD")
+        result = backtest_engine.run_backtest(strategy, "BTC-USD", "2024-01-01", "2024-01-31")
         
         # Should have no trades
         assert result.total_trades == 0
@@ -366,7 +366,7 @@ risk_management:
             processor = DataProcessor()
             processed_data = processor.add_basic_indicators(high_price_data)
             
-            result = backtest_engine.run_backtest(strategy, processed_data, "BTC-USD")
+            result = backtest_engine.run_backtest(strategy, "BTC-USD", "2024-01-01", "2024-01-31")
             
             # Should handle low capital gracefully
             assert result.initial_capital == 1.0
@@ -396,7 +396,7 @@ risk_management:
         # Test stop loss at entry price
         position2 = Position("ETH-USD", entry_price=2000.0, size=0.5, entry_date=datetime.now())
         position2.set_stop_loss(2000.0)  # Same as entry
-        assert position2.stop_loss_price == 2000.0
+        assert position2.stop_loss == 2000.0
     
     def test_backtesting_with_gaps_in_data(self, temp_config_file):
         """Test backtesting with missing data points (gaps)"""
@@ -423,7 +423,7 @@ risk_management:
         processor = DataProcessor()
         processed_data = processor.add_basic_indicators(gap_data)
         
-        result = backtest_engine.run_backtest(strategy, processed_data, "BTC-USD")
+        result = backtest_engine.run_backtest(strategy, "BTC-USD", "2024-01-01", "2024-01-31")
         
         # Should handle gaps gracefully
         assert isinstance(result.total_trades, int)
@@ -441,7 +441,10 @@ class TestNetworkAndAPIEdgeCases:
         mock_session_class.return_value = mock_session
         
         config = Config(temp_config_file)
-        fetcher = CoinbaseDataFetcher(config)
+        fetcher = CoinbaseDataFetcher(
+            config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
+            config.get('database.path', 'data/trading.db')
+        )
         
         # Should handle timeout gracefully
         with pytest.raises(Exception):
@@ -458,7 +461,10 @@ class TestNetworkAndAPIEdgeCases:
         mock_session_class.return_value = mock_session
         
         config = Config(temp_config_file)
-        fetcher = CoinbaseDataFetcher(config)
+        fetcher = CoinbaseDataFetcher(
+            config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
+            config.get('database.path', 'data/trading.db')
+        )
         
         # Should handle rate limiting appropriately
         try:
@@ -480,7 +486,10 @@ class TestNetworkAndAPIEdgeCases:
         mock_session_class.return_value = mock_session
         
         config = Config(temp_config_file)
-        fetcher = CoinbaseDataFetcher(config)
+        fetcher = CoinbaseDataFetcher(
+            config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
+            config.get('database.path', 'data/trading.db')
+        )
         
         # Should handle malformed response
         try:
