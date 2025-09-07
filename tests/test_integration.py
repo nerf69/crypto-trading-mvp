@@ -200,7 +200,7 @@ class TestConfigIntegration:
         backtest_engine = BacktestEngine(config)
         
         # Verify config values are used
-        assert backtest_engine.commission == config.get_backtesting_config()['commission']
+        assert float(backtest_engine.commission) == config.get_backtesting_config()['commission']
         assert hasattr(backtest_engine, 'config')
         
         # Test strategy weights

@@ -505,7 +505,7 @@ class BacktestEngine:
         total_trades = len(closed_positions)
         winning_trades = len([pos for pos in closed_positions if pos.pnl > 0])
         losing_trades = len([pos for pos in closed_positions if pos.pnl < 0])
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        win_rate = float(winning_trades / total_trades * 100) if total_trades > 0 else 0.0
         
         avg_win = np.mean([pos.pnl for pos in closed_positions if pos.pnl > 0]) if winning_trades > 0 else 0
         avg_loss = np.mean([pos.pnl for pos in closed_positions if pos.pnl < 0]) if losing_trades > 0 else 0
