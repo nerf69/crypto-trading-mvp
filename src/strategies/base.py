@@ -5,6 +5,20 @@ from typing import Optional
 import pandas as pd
 from datetime import datetime
 
+# Import constants for enterprise-grade configuration
+try:
+    from ..constants import (
+        HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD,
+        MAX_POSITION_SIZE, MEDIUM_POSITION_SIZE, MIN_POSITION_SIZE
+    )
+except ImportError:
+    # Fallback values if constants module not available
+    HIGH_CONFIDENCE_THRESHOLD = 0.8
+    MEDIUM_CONFIDENCE_THRESHOLD = 0.6
+    MAX_POSITION_SIZE = 1.0
+    MEDIUM_POSITION_SIZE = 0.66
+    MIN_POSITION_SIZE = 0.33
+
 class SignalType(Enum):
     STRONG_BUY = "STRONG_BUY"
     BUY = "BUY"
@@ -25,13 +39,13 @@ class TradingSignal:
     indicators: dict  # Store relevant indicator values
     
     def position_size_recommendation(self) -> float:
-        """Recommend position size based on confidence"""
-        if self.confidence >= 0.8:
-            return 1.0  # 100% of available capital
-        elif self.confidence >= 0.6:
-            return 0.66  # 66%
+        """Recommend position size based on confidence using enterprise constants"""
+        if self.confidence >= HIGH_CONFIDENCE_THRESHOLD:
+            return MAX_POSITION_SIZE
+        elif self.confidence >= MEDIUM_CONFIDENCE_THRESHOLD:
+            return MEDIUM_POSITION_SIZE
         else:
-            return 0.33  # 33%
+            return MIN_POSITION_SIZE
 
 class Strategy(ABC):
     """Base class for all trading strategies"""

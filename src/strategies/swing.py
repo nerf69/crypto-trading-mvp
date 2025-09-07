@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import Dict, Any
 
 from .base import Strategy, TradingSignal, SignalType
+from ..constants import (
+    DEFAULT_SWING_THRESHOLD, DEFAULT_VOLUME_THRESHOLD, DEFAULT_LOOKBACK_PERIOD,
+    DEFAULT_RSI_OVERSOLD, DEFAULT_RSI_OVERBOUGHT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +27,12 @@ class SwingTradingStrategy(Strategy):
     - Take profit target hit (2.5-7.5%)
     """
     
-    def __init__(self, swing_threshold: float = 0.025, volume_threshold: float = 1.1):
+    def __init__(self, swing_threshold: float = DEFAULT_SWING_THRESHOLD, 
+                 volume_threshold: float = DEFAULT_VOLUME_THRESHOLD):
         super().__init__("2.5% Swing Strategy")
-        self.swing_threshold = swing_threshold  # 2.5% swing threshold for daily data
-        self.volume_threshold = volume_threshold  # Volume must be 1.1x average (less restrictive)
-        self.lookback_period = 10  # Period to look for highs/lows (reduced for daily)
+        self.swing_threshold = swing_threshold
+        self.volume_threshold = volume_threshold
+        self.lookback_period = DEFAULT_LOOKBACK_PERIOD
     
     def add_required_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add indicators required by this strategy"""

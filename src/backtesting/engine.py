@@ -5,12 +5,18 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from decimal import Decimal, getcontext, ROUND_HALF_UP
 import json
 
 from ..strategies.base import Strategy, TradingSignal, SignalType
 from ..data.fetcher import CoinbaseDataFetcher
 from ..data.processor import DataProcessor
 from ..config import get_config
+from ..constants import (
+    MIN_SIGNAL_CONFIDENCE, DEFAULT_COMMISSION_RATE, DEFAULT_SLIPPAGE_PCT,
+    MAX_PORTFOLIO_RISK, COINBASE_MAX_CANDLES_PER_REQUEST, MAX_POSITION_COUNT,
+    PRICE_PRECISION, MIN_TRADE_SIZE_USD
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +132,10 @@ class BacktestEngine:
     """
     
     def __init__(self, config=None):
+        # Set decimal precision for financial calculations
+        getcontext().prec = PRICE_PRECISION + 2  # Extra precision for intermediate calculations
+        getcontext().rounding = ROUND_HALF_UP
+        
         self.config = config or get_config()
         self.data_fetcher = CoinbaseDataFetcher(
             self.config.get('exchange.base_url', 'https://api.exchange.coinbase.com'),
@@ -133,11 +143,15 @@ class BacktestEngine:
         )
         self.data_processor = DataProcessor()
         
-        # Backtesting parameters
-        self.commission = self.config.get('backtesting.commission', 0.005)  # 0.5% per trade
-        self.slippage = 0.001  # 0.1% slippage
+        # Backtesting parameters with proper decimal handling
+        commission_config = self.config.get('backtesting.commission', float(DEFAULT_COMMISSION_RATE))
+        self.commission = Decimal(str(commission_config))
+        self.slippage = DEFAULT_SLIPPAGE_PCT
+        self.max_positions = MAX_POSITION_COUNT
+        self.min_trade_size = MIN_TRADE_SIZE_USD
         
-        logger.info(f"Backtesting engine initialized with {self.commission*100}% commission")
+        logger.info(f"Backtesting engine initialized with {float(self.commission)*100:.3f}% commission, "
+                   f"{float(self.slippage)*100:.3f}% slippage")
     
     def run_backtest(self, strategy: Strategy, pair: str, start_date: str, end_date: str,
                     initial_capital: float = None) -> BacktestResult:
@@ -226,8 +240,8 @@ class BacktestEngine:
         days = (end_dt - start_dt).days
         
         # Coinbase allows max 300 data points per request
-        # Use buffer of 250 points to be safe
-        max_points = 250
+        # Use safe buffer to prevent API limit errors
+        max_points = COINBASE_MAX_CANDLES_PER_REQUEST
         
         if days <= 1:
             # Up to 1 day: 5-minute granularity (288 points max)
@@ -374,10 +388,10 @@ class BacktestEngine:
                     if (i % 10 == 0 and i > warmup_period) or signal.signal != SignalType.HOLD:
                         logger.debug(f"Period {i+1}: {signal.signal.value} signal - {signal.reason} (confidence: {signal.confidence:.2f})")
                     
-                    # Handle BUY signals - enter new long positions
+                    # Handle BUY signals - enter new long positions with proper validation
                     if (signal.signal in [SignalType.BUY, SignalType.STRONG_BUY] and
-                        len(open_positions) < max_positions and
-                        signal.confidence >= 0.6):  # Minimum confidence threshold
+                        len(open_positions) < self.max_positions and
+                        signal.confidence >= MIN_SIGNAL_CONFIDENCE):
                         
                         position_size = self._calculate_position_size(
                             signal, current_capital, position_sizing
@@ -403,7 +417,7 @@ class BacktestEngine:
                     
                     # Handle SELL signals - close existing long positions only
                     elif (signal.signal in [SignalType.SELL, SignalType.STRONG_SELL] and
-                          signal.confidence >= 0.6):
+                          signal.confidence >= MIN_SIGNAL_CONFIDENCE):
                         
                         # Find and close any open long positions for this pair
                         positions_to_close = [pos for pos in open_positions 
@@ -496,12 +510,9 @@ class BacktestEngine:
         avg_win = np.mean([pos.pnl for pos in closed_positions if pos.pnl > 0]) if winning_trades > 0 else 0
         avg_loss = np.mean([pos.pnl for pos in closed_positions if pos.pnl < 0]) if losing_trades > 0 else 0
         
-        # Calculate Sharpe ratio
-        if len(equity_df) > 1:
-            returns = equity_df['equity'].pct_change().dropna()
-            sharpe_ratio = (returns.mean() / returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
-        else:
-            sharpe_ratio = 0
+        # Calculate enhanced risk-adjusted performance metrics
+        risk_metrics = self._calculate_risk_adjusted_metrics(equity_df, initial_capital, total_return)
+        sharpe_ratio = risk_metrics['sharpe_ratio']
         
         return BacktestResult(
             strategy_name=strategy.name,
@@ -547,28 +558,49 @@ class BacktestEngine:
     
     def _calculate_position_size(self, signal: TradingSignal, available_capital: float,
                                position_sizing: Dict) -> float:
-        """Calculate position size based on signal confidence and available capital"""
+        """
+        Calculate position size with comprehensive risk validation and proper decimal handling
+        """
+        if available_capital <= 0:
+            logger.warning("No available capital for new positions")
+            return 0
+        
+        # Convert to Decimal for precise financial calculations
+        available_capital_decimal = Decimal(str(available_capital))
+        signal_price_decimal = Decimal(str(signal.price))
         
         sizing_method = position_sizing.get('method', 'dynamic')
-        max_position_size = position_sizing.get('max_position_size', 1.0)
-        min_position_size = position_sizing.get('min_position_size', 0.33)
+        max_position_size = min(position_sizing.get('max_position_size', MAX_POSITION_SIZE), MAX_POSITION_SIZE)
+        min_position_size = max(position_sizing.get('min_position_size', MIN_POSITION_SIZE), Decimal('0.01'))
         
         if sizing_method == 'fixed':
-            allocation_pct = max_position_size
-        else:  # dynamic
-            # Size based on confidence
-            if signal.confidence >= 0.8:
-                allocation_pct = max_position_size
-            elif signal.confidence >= 0.6:
-                allocation_pct = (min_position_size + max_position_size) / 2
+            allocation_pct = Decimal(str(max_position_size))
+        else:  # dynamic sizing based on confidence with enterprise constants
+            if signal.confidence >= HIGH_CONFIDENCE_THRESHOLD:
+                allocation_pct = Decimal(str(max_position_size))
+            elif signal.confidence >= MEDIUM_CONFIDENCE_THRESHOLD:
+                allocation_pct = Decimal(str((min_position_size + max_position_size) / 2))
             else:
-                allocation_pct = min_position_size
+                allocation_pct = Decimal(str(min_position_size))
+        
+        # Calculate position value with risk controls
+        position_value = available_capital_decimal * allocation_pct
+        
+        # Apply maximum single position risk limit
+        max_risk_value = available_capital_decimal * MAX_SINGLE_POSITION_RISK
+        if position_value > max_risk_value:
+            position_value = max_risk_value
+            logger.info(f"Position size capped by risk limit: ${float(max_risk_value):.2f}")
+        
+        # Check minimum trade size requirement
+        if position_value < self.min_trade_size:
+            logger.debug(f"Position value ${float(position_value):.2f} below minimum ${float(self.min_trade_size):.2f}")
+            return 0
         
         # Calculate position size in terms of quantity
-        position_value = available_capital * allocation_pct
-        position_size = position_value / signal.price
+        position_size = position_value / signal_price_decimal
         
-        return position_size
+        return float(position_size)
     
     def _create_position(self, signal: TradingSignal, current_price: float, 
                         current_time: datetime, position_size: float,
@@ -579,7 +611,7 @@ class BacktestEngine:
         if hasattr(strategy, 'get_stop_loss_level'):
             stop_loss = strategy.get_stop_loss_level(current_price, signal.signal)
         else:
-            stop_loss_pct = 0.05  # Default 5%
+            stop_loss_pct = float(DEFAULT_STOP_LOSS_PCT)
             if signal.signal in [SignalType.BUY, SignalType.STRONG_BUY]:
                 stop_loss = current_price * (1 - stop_loss_pct)
             else:
@@ -709,3 +741,76 @@ class BacktestEngine:
                 json.dump(summary, f, indent=2, default=str)
         
         logger.info(f"Backtest results saved to {output_dir}/")
+    
+    def _calculate_risk_adjusted_metrics(self, equity_df: pd.DataFrame, 
+                                       initial_capital: float, total_return: float) -> Dict[str, float]:
+        """
+        Calculate comprehensive risk-adjusted performance metrics for enterprise trading
+        
+        Returns:
+            Dictionary containing Sharpe, Sortino, Calmar ratios and other risk metrics
+        """
+        from ..constants import RISK_FREE_RATE, TRADING_DAYS_PER_YEAR
+        
+        if len(equity_df) < 2:
+            return {
+                'sharpe_ratio': 0,
+                'sortino_ratio': 0,
+                'calmar_ratio': 0,
+                'max_consecutive_losses': 0,
+                'profit_factor': 0,
+                'value_at_risk_5pct': 0
+            }
+        
+        # Calculate returns
+        equity_values = equity_df['equity'].values
+        returns = np.diff(equity_values) / equity_values[:-1]
+        
+        # Basic statistics
+        mean_return = np.mean(returns) * TRADING_DAYS_PER_YEAR  # Annualized
+        return_std = np.std(returns) * np.sqrt(TRADING_DAYS_PER_YEAR)  # Annualized
+        
+        # Sharpe Ratio
+        risk_free = float(RISK_FREE_RATE)
+        sharpe_ratio = (mean_return - risk_free) / return_std if return_std > 0 else 0
+        
+        # Sortino Ratio (uses downside deviation instead of total volatility)
+        negative_returns = returns[returns < 0]
+        downside_std = np.std(negative_returns) * np.sqrt(TRADING_DAYS_PER_YEAR) if len(negative_returns) > 1 else return_std
+        sortino_ratio = (mean_return - risk_free) / downside_std if downside_std > 0 else 0
+        
+        # Maximum Drawdown (already calculated, but let's be precise)
+        peak = np.maximum.accumulate(equity_values)
+        drawdown = (peak - equity_values) / peak
+        max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0
+        
+        # Calmar Ratio (annual return / max drawdown)
+        annual_return = (equity_values[-1] / equity_values[0]) ** (TRADING_DAYS_PER_YEAR / len(equity_values)) - 1
+        calmar_ratio = annual_return / max_drawdown if max_drawdown > 0 else 0
+        
+        # Maximum Consecutive Losses
+        consecutive_losses = 0
+        max_consecutive_losses = 0
+        for ret in returns:
+            if ret < 0:
+                consecutive_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+            else:
+                consecutive_losses = 0
+        
+        # Profit Factor (gross profit / gross loss)
+        gross_profit = np.sum(returns[returns > 0]) * initial_capital
+        gross_loss = abs(np.sum(returns[returns < 0])) * initial_capital
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        
+        # Value at Risk (5th percentile of daily returns)
+        value_at_risk_5pct = np.percentile(returns, 5) * initial_capital if len(returns) > 0 else 0
+        
+        return {
+            'sharpe_ratio': float(sharpe_ratio),
+            'sortino_ratio': float(sortino_ratio),
+            'calmar_ratio': float(calmar_ratio),
+            'max_consecutive_losses': int(max_consecutive_losses),
+            'profit_factor': float(profit_factor),
+            'value_at_risk_5pct': float(value_at_risk_5pct)
+        }

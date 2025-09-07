@@ -2,8 +2,15 @@ import pandas as pd
 import numpy as np
 import logging
 from typing import Dict, List, Optional, Tuple
+from decimal import Decimal, getcontext, ROUND_HALF_UP
 import ta
 from scipy import stats
+
+from ..constants import (
+    MIN_DATA_POINTS_FOR_INDICATORS, RSI_PERIOD, MACD_FAST_PERIOD,
+    MACD_SLOW_PERIOD, MACD_SIGNAL_PERIOD, BOLLINGER_PERIOD, BOLLINGER_STD_DEV,
+    MAX_PRICE_CHANGE_PCT, MIN_VOLUME, PRICE_PRECISION
+)
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +20,9 @@ class DataProcessor:
     """
     
     def __init__(self):
-        pass
+        # Set decimal precision for financial calculations
+        getcontext().prec = PRICE_PRECISION + 2
+        getcontext().rounding = ROUND_HALF_UP
     
     def clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -70,9 +79,81 @@ class DataProcessor:
         logger.debug(f"Data cleaned: {len(clean_df)} rows remaining")
         return clean_df
     
+    def validate_ohlcv_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Enterprise-grade OHLCV data validation with comprehensive checks
+        
+        Args:
+            df: DataFrame with OHLCV data
+            
+        Returns:
+            Validated DataFrame with quality scores
+        """
+        if df.empty:
+            return df
+            
+        logger.debug("Performing comprehensive OHLCV validation...")
+        validated_df = df.copy()
+        
+        # Track validation issues
+        validation_issues = 0
+        
+        # 1. Price ordering validation (Low ≤ Open,Close ≤ High)
+        price_order_invalid = (
+            (validated_df['low'] > validated_df['open']) |
+            (validated_df['low'] > validated_df['close']) |
+            (validated_df['high'] < validated_df['open']) |
+            (validated_df['high'] < validated_df['close'])
+        )
+        
+        if price_order_invalid.any():
+            invalid_count = price_order_invalid.sum()
+            validation_issues += invalid_count
+            logger.warning(f"Found {invalid_count} rows with invalid OHLC price ordering")
+            
+            # Fix by adjusting high/low to accommodate open/close
+            validated_df.loc[price_order_invalid, 'high'] = validated_df.loc[price_order_invalid, [
+                'open', 'high', 'close']].max(axis=1)
+            validated_df.loc[price_order_invalid, 'low'] = validated_df.loc[price_order_invalid, [
+                'open', 'low', 'close']].min(axis=1)
+        
+        # 2. Volume validation
+        if 'volume' in validated_df.columns:
+            invalid_volume = validated_df['volume'] < MIN_VOLUME
+            if invalid_volume.any():
+                validation_issues += invalid_volume.sum()
+                logger.warning(f"Found {invalid_volume.sum()} rows with volume below minimum {MIN_VOLUME}")
+                validated_df.loc[invalid_volume, 'volume'] = MIN_VOLUME
+        
+        # 3. Outlier detection using price change percentage
+        if len(validated_df) > 1:
+            price_change_pct = validated_df['close'].pct_change().abs()
+            outliers = price_change_pct > MAX_PRICE_CHANGE_PCT
+            
+            if outliers.any():
+                outlier_count = outliers.sum()
+                validation_issues += outlier_count
+                logger.warning(f"Found {outlier_count} potential outliers with >50% price change")
+                
+                # Cap extreme price changes by interpolation
+                validated_df.loc[outliers, 'close'] = validated_df['close'].interpolate()
+        
+        # 4. Add data quality score
+        total_rows = len(validated_df)
+        quality_score = max(0, (total_rows - validation_issues) / total_rows) if total_rows > 0 else 0
+        validated_df.attrs['data_quality_score'] = quality_score
+        
+        if validation_issues > 0:
+            logger.info(f"Data validation completed: {validation_issues} issues fixed, "
+                       f"quality score: {quality_score:.3f}")
+        else:
+            logger.debug(f"Data validation passed: quality score: {quality_score:.3f}")
+        
+        return validated_df
+    
     def add_basic_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add basic technical indicators to DataFrame"""
-        if df.empty or len(df) < 20:
+        """Add basic technical indicators with enhanced precision"""
+        if df.empty or len(df) < MIN_DATA_POINTS_FOR_INDICATORS:
             logger.warning("Insufficient data for indicator calculation")
             return df
         
@@ -107,19 +188,20 @@ class DataProcessor:
         return df
     
     def add_momentum_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add momentum-based indicators"""
-        if df.empty or len(df) < 14:
+        """Add momentum-based indicators with enterprise constants"""
+        if df.empty or len(df) < RSI_PERIOD:
             return df
         
         df = df.copy()
-        logger.debug("Calculating momentum indicators...")
+        logger.debug("Calculating momentum indicators with enhanced precision...")
         
         try:
-            # RSI
-            df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+            # RSI with configurable period
+            df['rsi'] = ta.momentum.rsi(df['close'], window=RSI_PERIOD)
             
-            # MACD
-            macd = ta.trend.MACD(df['close'], window_fast=12, window_slow=26, window_sign=9)
+            # MACD with enterprise constants
+            macd = ta.trend.MACD(df['close'], window_fast=MACD_FAST_PERIOD, 
+                                window_slow=MACD_SLOW_PERIOD, window_sign=MACD_SIGNAL_PERIOD)
             df['macd'] = macd.macd()
             df['macd_signal'] = macd.macd_signal()
             df['macd_histogram'] = macd.macd_diff()
@@ -417,3 +499,64 @@ class DataProcessor:
             quality_report["reason"] = "Too many null values"
         
         return quality_report
+    
+    def calculate_indicators_vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Vectorized calculation of all indicators for enhanced performance
+        
+        Uses numpy vectorization and efficient pandas operations to calculate
+        multiple indicators simultaneously for better performance on large datasets.
+        """
+        if df.empty or len(df) < MIN_DATA_POINTS_FOR_INDICATORS:
+            logger.warning("Insufficient data for vectorized indicator calculation")
+            return df
+            
+        logger.debug("Starting vectorized indicator calculation...")
+        start_time = pd.Timestamp.now()
+        
+        # Work with numpy arrays for maximum performance
+        prices = df[['open', 'high', 'low', 'close', 'volume']].values
+        close_prices = prices[:, 3]  # Close is column 3
+        high_prices = prices[:, 1]   # High is column 1
+        low_prices = prices[:, 2]    # Low is column 2
+        volume = prices[:, 4]        # Volume is column 4
+        
+        result_df = df.copy()
+        
+        try:
+            # Vectorized Simple Moving Averages
+            result_df['sma_20'] = pd.Series(close_prices).rolling(window=20, min_periods=1).mean()
+            result_df['sma_50'] = pd.Series(close_prices).rolling(window=50, min_periods=1).mean()
+            
+            # Vectorized Exponential Moving Averages
+            close_series = pd.Series(close_prices)
+            result_df['ema_12'] = close_series.ewm(span=12, adjust=False).mean()
+            result_df['ema_26'] = close_series.ewm(span=26, adjust=False).mean()
+            
+            # Vectorized Price Changes and Returns
+            result_df['price_change'] = np.diff(close_prices, prepend=close_prices[0])
+            result_df['returns'] = np.concatenate([[0], np.diff(np.log(close_prices))])
+            
+            # Vectorized Volatility (rolling standard deviation of returns)
+            returns_series = pd.Series(result_df['returns'])
+            result_df['volatility'] = returns_series.rolling(window=20, min_periods=1).std()
+            
+            # Vectorized High-Low range calculations
+            hl_range = high_prices - low_prices
+            result_df['hl_range'] = hl_range
+            result_df['hl_range_pct'] = (hl_range / close_prices) * 100
+            
+            # Vectorized Volume-based indicators
+            volume_series = pd.Series(volume)
+            result_df['volume_sma'] = volume_series.rolling(window=20, min_periods=1).mean()
+            result_df['volume_ratio'] = volume / result_df['volume_sma'].fillna(volume.mean())
+            
+            # Performance logging
+            calculation_time = (pd.Timestamp.now() - start_time).total_seconds()
+            logger.info(f"Vectorized indicator calculation completed in {calculation_time:.3f}s "
+                       f"for {len(df)} data points")
+            
+        except Exception as e:
+            logger.error(f"Error in vectorized indicator calculation: {e}")
+            
+        return result_df
