@@ -1,0 +1,8 @@
+{
+  "timestamp": "2025-09-10T09:27:51.168323",
+  "total_strategies_tested": 7,
+  "total_pairs_tested": 2,
+  "best_overall_strategy": "Dynamic 3%",
+  "best_eth_strategy": "Pure 2%",
+  "best_sol_strategy": "Pure 2%"
+}
